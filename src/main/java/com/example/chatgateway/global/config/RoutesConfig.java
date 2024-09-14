@@ -1,6 +1,6 @@
-package com.example.chatgateway.config;
+package com.example.chatgateway.global.config;
 
-import com.example.chatgateway.filter.AuthFilter;
+import com.example.chatgateway.global.filter.AuthFilter;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.cloud.gateway.route.RouteLocator;

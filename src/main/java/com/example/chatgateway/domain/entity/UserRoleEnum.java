@@ -1,4 +1,4 @@
-package com.example.chatgateway.entity;
+package com.example.chatgateway.domain.entity;
 
 import lombok.Getter;
 

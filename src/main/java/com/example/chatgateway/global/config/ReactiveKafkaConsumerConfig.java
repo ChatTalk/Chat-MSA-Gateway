@@ -1,6 +1,6 @@
-package com.example.chatgateway.config;
+package com.example.chatgateway.global.config;
 
-import com.example.chatgateway.dto.UserInfoDTO;
+import com.example.chatgateway.domain.dto.UserInfoDTO;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.springframework.beans.factory.annotation.Value;

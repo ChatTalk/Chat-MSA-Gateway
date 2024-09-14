@@ -1,4 +1,4 @@
-package com.example.chatgateway.filter;
+package com.example.chatgateway.global.filter;
 
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.cloud.gateway.filter.GatewayFilter;
