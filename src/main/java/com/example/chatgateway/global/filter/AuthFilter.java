@@ -10,8 +10,8 @@ import org.springframework.cloud.gateway.filter.GatewayFilter;
 import org.springframework.cloud.gateway.filter.GatewayFilterChain;
 import org.springframework.http.HttpCookie;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseCookie;
 import org.springframework.http.server.reactive.ServerHttpRequest;
-import org.springframework.kafka.core.reactive.ReactiveKafkaConsumerTemplate;
 import org.springframework.kafka.core.reactive.ReactiveKafkaProducerTemplate;
 import org.springframework.stereotype.Component;
 import org.springframework.web.server.ResponseStatusException;
@@ -19,6 +19,9 @@ import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Mono;
 import reactor.kafka.receiver.KafkaReceiver;
 
+import java.net.URLDecoder;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.UUID;
 
@@ -57,7 +60,8 @@ public class AuthFilter implements GatewayFilter {
         TokenDTO tokenDTO = new TokenDTO(id, token);
 
         // 인증 요청 Kafka 전송
-        return kafkaProducerTemplate.send(topic, tokenDTO)
+        // 동일한 파티션을 왕복
+        return kafkaProducerTemplate.send(topic, id.toString(), tokenDTO)
                 .then(Mono.defer(() -> {
                     // 인증 응답 대기
                     return kafkaReceiver
@@ -69,10 +73,14 @@ public class AuthFilter implements GatewayFilter {
                             .next()
                             .map(ConsumerRecord::value)
                             .flatMap(userInfoDTO -> {
+                                // 쿠키 업데이트
+                                updateTokenCookieIfNeeded(exchange, token, userInfoDTO.getToken());
+
                                 // 인증 결과를 요청 헤더에 추가
                                 ServerHttpRequest modifiedRequest = exchange.getRequest()
                                         .mutate()
-                                        .header("User", userInfoDTO.toString())
+                                        .header("email", userInfoDTO.getEmail())
+                                        .header("role", userInfoDTO.getRole())
                                         .build();
 
                                 log.info("응답 이메일 및 권한: {}. {}", userInfoDTO.getEmail(), userInfoDTO.getRole());
@@ -101,5 +109,17 @@ public class AuthFilter implements GatewayFilter {
         }
 
         return token;
+    }
+
+    // 쿠키 업데이트 메소드
+    private void updateTokenCookieIfNeeded(ServerWebExchange exchange, String currentToken, String newToken) {
+        log.info("토큰 업데이트? 현재 토큰 {}, 새로운 토큰 {}", currentToken, newToken);
+        if (!currentToken.equals(newToken)) {
+            exchange.getResponse().addCookie(ResponseCookie.from(COOKIE_AUTH_HEADER, newToken)
+                    .path("/")  // 쿠키의 유효 경로 설정
+//                    .httpOnly(true)  // 보안 설정 (HTTP만 접근 가능)
+                    .maxAge(Duration.ofHours(1))  // 쿠키 유효기간 설정
+                    .build());
+        }
     }
 }
