@@ -11,8 +11,7 @@ import java.util.UUID;
 @Setter
 @AllArgsConstructor
 @NoArgsConstructor
-public class UserInfoDTO {
+public class TokenDTO {
     private UUID id;
-    private String email;
-    private String role;
+    private String token;
 }
