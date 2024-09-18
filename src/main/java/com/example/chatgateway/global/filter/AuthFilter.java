@@ -19,9 +19,6 @@ import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Mono;
 import reactor.kafka.receiver.KafkaReceiver;
 
-import java.net.URLDecoder;
-import java.net.URLEncoder;
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.UUID;
 
@@ -49,6 +46,9 @@ public class AuthFilter implements GatewayFilter {
         }
 
         // 토큰 쿠키에서 추출
+        /**
+         * 웹소켓 경로의 토큰(from header) http 경로의 토큰(from cookie) 파싱 위치 다른 것 인지
+         */
         String token = extractTokenFromCookies(exchange.getRequest());
         if (token == null) {
             return Mono.error(new ResponseStatusException(HttpStatus.UNAUTHORIZED, "No access token found"));
