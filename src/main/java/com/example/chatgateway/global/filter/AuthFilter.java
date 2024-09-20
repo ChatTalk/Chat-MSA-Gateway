@@ -9,6 +9,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.cloud.gateway.filter.GatewayFilter;
 import org.springframework.cloud.gateway.filter.GatewayFilterChain;
 import org.springframework.http.HttpCookie;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseCookie;
 import org.springframework.http.server.reactive.ServerHttpRequest;
@@ -20,6 +21,7 @@ import reactor.core.publisher.Mono;
 import reactor.kafka.receiver.KafkaReceiver;
 
 import java.time.Duration;
+import java.util.Objects;
 import java.util.UUID;
 
 import static com.example.chatgateway.global.constant.Constants.COOKIE_AUTH_HEADER;
@@ -37,8 +39,11 @@ public class AuthFilter implements GatewayFilter {
 
     @Override
     public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
+        String uri = exchange.getRequest().getURI().toString();
+        log.info("요청이 들어온 경로: {}", uri);
         String path = exchange.getRequest().getURI().getPath();
-        log.info("요청이 들어온 경로: {}", path);
+
+        log.info("응답 초기 헤더 확인: {}", exchange.getResponse().getHeaders()); // 여기서는 문제 없음
 
         // 예외 처리(로그인 및 회원가입)
         if (path.startsWith("/api/users/login") || path.startsWith("/api/users/signup")) {
@@ -49,6 +54,7 @@ public class AuthFilter implements GatewayFilter {
         /**
          * 웹소켓 경로의 토큰(from header) http 경로의 토큰(from cookie) 파싱 위치 다른 것 인지
          */
+
         String token = extractTokenFromCookies(exchange.getRequest());
         if (token == null) {
             return Mono.error(new ResponseStatusException(HttpStatus.UNAUTHORIZED, "No access token found"));
@@ -85,6 +91,18 @@ public class AuthFilter implements GatewayFilter {
 
                                 log.info("응답 이메일 및 권한: {}. {}", userInfoDTO.getEmail(), userInfoDTO.getRole());
 
+                                log.info("인증 이후의 응답 헤더 확인: {}", exchange.getResponse().getHeaders());
+                                // 여기까지는 Vary 값들이 하나씩만 찍히는데 왜 브라우저 응답 헤더에는 2개씩 찍히지?
+                                // 솔직히 얘가 원인이라고 확실하지도 않은 상태... 그냥 다른 애들이랑 비교하니 여기에서 차이가 보여서 그런 거...ㅠ
+//
+//                                if (uri.startsWith("http://localhost:8080/stomp/chat")) {
+//                                    log.info("확인이나 좀 해보자: {}",
+//                                            Objects.requireNonNull(exchange.getResponse().getHeaders().get(HttpHeaders.VARY)));
+//
+//                                    exchange.getResponse().getHeaders().remove(HttpHeaders.VARY);
+//                                    exchange.getResponse().getHeaders().add("content-type", "application/json");
+//                                }
+
                                 // 수정된 요청으로 다음 단계로 넘기기
                                 return chain.filter(exchange.mutate().request(modifiedRequest).build());
                             })
@@ -114,6 +132,7 @@ public class AuthFilter implements GatewayFilter {
     // 쿠키 업데이트 메소드
     private void updateTokenCookieIfNeeded(ServerWebExchange exchange, String currentToken, String newToken) {
         log.info("토큰 업데이트? 현재 토큰 {}, 새로운 토큰 {}", currentToken, newToken);
+        log.info("토큰이 같은지 다른지: {}", currentToken.equals(newToken));
         if (!currentToken.equals(newToken)) {
             exchange.getResponse().addCookie(ResponseCookie.from(COOKIE_AUTH_HEADER, newToken)
                     .path("/")  // 쿠키의 유효 경로 설정

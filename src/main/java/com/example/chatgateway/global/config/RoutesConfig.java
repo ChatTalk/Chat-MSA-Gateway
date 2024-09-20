@@ -19,6 +19,12 @@ public class RoutesConfig {
     @Value("${uri.chat}")
     private String chat;
 
+    @Value("${uri.message}")
+    private String message;
+
+    @Value("${uri.ws}")
+    private String ws;
+
     private final AuthFilter authFilter;
 
     @Bean
@@ -31,6 +37,13 @@ public class RoutesConfig {
                 .route("chat", r -> r.path("/api/open-chats/**")
                         .filters(f -> f.filter(authFilter))
                         .uri(chat))
+                .route("message", r -> r.path("/stomp/chat/**")
+                        .filters(f -> f.filter(authFilter))
+                        .uri(message))
+//                .route("ws", r -> r.path("/stomp/chat/**")
+//                        .uri(ws))
                 .build();
     }
+
+
 }
