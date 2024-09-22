@@ -58,6 +58,21 @@ public class AuthFilter implements GatewayFilter {
         String id = createFingerPrint(exchange, token);
         log.info("추출된 토큰: {} // 아이디: {}", token, id);
 
+        // 캐시 조회
+        if (userInfoTemplate != null && Boolean.TRUE.equals(userInfoTemplate.hasKey(id))) {
+            UserInfoDTO userInfoDTO = userInfoTemplate.opsForValue().get(id);
+
+            if (userInfoDTO != null) { // userInfoDTO null 체크 추가
+                ServerHttpRequest modifiedRequest = exchange.getRequest()
+                        .mutate()
+                        .header("email", userInfoDTO.getEmail())
+                        .header("role", userInfoDTO.getRole())
+                        .build();
+
+                return chain.filter(exchange.mutate().request(modifiedRequest).build());
+            }
+        }
+
         TokenDTO tokenDTO = new TokenDTO(id, token);
 
         // 인증 요청 Kafka 전송(파티션의 존재 이유: 묶어야 할 메세지들을 파티션으로 보내면서 대기열 구현)
