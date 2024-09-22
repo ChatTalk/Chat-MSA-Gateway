@@ -18,6 +18,7 @@ import org.springframework.kafka.core.reactive.ReactiveKafkaProducerTemplate;
 import org.springframework.stereotype.Component;
 import org.springframework.web.server.ResponseStatusException;
 import org.springframework.web.server.ServerWebExchange;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.kafka.receiver.KafkaReceiver;
 
@@ -36,7 +37,6 @@ public class AuthFilter implements GatewayFilter {
     private String topic;
 
     private final ReactiveKafkaProducerTemplate<String, TokenDTO> kafkaProducerTemplate;
-    private final KafkaReceiver<String, UserInfoDTO> kafkaReceiver;
     private final RedisTemplate<String, UserInfoDTO> userInfoTemplate;
 
     @Override
@@ -62,39 +62,28 @@ public class AuthFilter implements GatewayFilter {
 
         TokenDTO tokenDTO = new TokenDTO(id, token);
 
-        // 인증 요청 Kafka 전송
-        // 동일한 파티션을 왕복
-        return kafkaProducerTemplate.send(topic, id.toString(), tokenDTO)
-                .then(Mono.defer(() -> {
-                    // 인증 응답 대기
-                    return kafkaReceiver
-                            .receive()
-                            .filter(record -> record.key().equals(id.toString()))
-                            .next()
-                            .timeout(Duration.ofSeconds(10))  // 타임아웃 설정
-                            .onErrorResume(e -> {
-                                        // 오류 처리
-                                        return Mono.error(new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Error during authentication", e));
-                                    })
-                            .map(ConsumerRecord::value)
+        // 인증 요청 Kafka 전송(파티션의 존재 이유: 묶어야 할 메세지들을 파티션으로 보내면서 대기열 구현)
+        return kafkaProducerTemplate.send(topic, tokenDTO)
+                .flatMap(result -> {
+                    // Kafka에 메시지 전송 후 Redis에서 결과를 비동기적으로 조회
+                    return checkRedisForUserInfo(id.toString())
                             .flatMap(userInfoDTO -> {
-                                // 쿠키 업데이트
-                                updateTokenCookieIfNeeded(exchange, token, userInfoDTO.getToken());
-
-                                // 인증 결과를 요청 헤더에 추가
                                 ServerHttpRequest modifiedRequest = exchange.getRequest()
                                         .mutate()
                                         .header("email", userInfoDTO.getEmail())
                                         .header("role", userInfoDTO.getRole())
                                         .build();
 
-                                log.info("응답 이메일 및 권한: {}. {}", userInfoDTO.getEmail(), userInfoDTO.getRole());
-                                log.info("인증 이후의 응답 헤더 확인: {}", exchange.getResponse().getHeaders());
-
-                                // 수정된 요청으로 다음 단계로 넘기기
+                                updateTokenCookieIfNeeded(exchange, token, userInfoDTO.getToken());
                                 return chain.filter(exchange.mutate().request(modifiedRequest).build());
                             });
-                }));
+                })
+                .onErrorResume(e -> {
+                    // Kafka 전송 오류 처리
+                    log.error("Kafka 전송 오류: {}", e.getMessage());
+                    return Mono.error(
+                            new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "카프카 전송 로직 에러 발생"));
+                });
     }
 
     private String extractTokenFromCookies(ServerHttpRequest request) {
@@ -114,9 +103,8 @@ public class AuthFilter implements GatewayFilter {
 
     // 쿠키 업데이트 메소드
     private void updateTokenCookieIfNeeded(ServerWebExchange exchange, String currentToken, String newToken) {
-        log.info("토큰 업데이트? 현재 토큰 {}, 새로운 토큰 {}", currentToken, newToken);
-        log.info("토큰이 같은지 다른지: {}", currentToken.equals(newToken));
         if (!currentToken.equals(newToken)) {
+            log.info("토큰 업데이트: 현재 토큰 {} ->, 새로운 토큰 {}", currentToken, newToken);
             exchange.getResponse().addCookie(ResponseCookie.from(COOKIE_AUTH_HEADER, newToken)
                     .path("/")  // 쿠키의 유효 경로 설정
 //                    .httpOnly(true)  // 보안 설정 (HTTP만 접근 가능)
@@ -124,4 +112,26 @@ public class AuthFilter implements GatewayFilter {
                     .build());
         }
     }
+
+    private Mono<UserInfoDTO> checkRedisForUserInfo(String id) {
+        return Mono.defer(() -> {
+                    UserInfoDTO userInfo = userInfoTemplate.opsForValue().get(id);
+
+                    if (userInfo != null) {
+                        log.info("Redis에서 사용자 정보 조회 성공 - UserInfo: {}", userInfo);  // 성공 시 로그 추가
+                        return Mono.just(userInfo);
+                    } else {
+                        log.info("Redis에서 사용자 정보가 없음 - ID: {}\n 조회하는 시간: {}", id, System.nanoTime());  // 데이터가 없는 경우 로그 추가
+                        return Mono.empty();
+                    }
+                })
+                .repeatWhenEmpty(flux -> flux
+                        .delayElements(Duration.ofMillis(50)) // 0.05초 간격으로 재시도
+                        .take(5)) // 재시도
+                .timeout(Duration.ofSeconds(10)) // 타임아웃 설정
+                .onErrorResume(e ->
+                        Mono.error(new ResponseStatusException(
+                                HttpStatus.INTERNAL_SERVER_ERROR, "레디스 유저 임시정보 조회 에러", e)));
+    }
+
 }
