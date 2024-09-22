@@ -4,7 +4,6 @@ import com.example.chatgateway.domain.dto.TokenDTO;
 import com.example.chatgateway.domain.dto.UserInfoDTO;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.cloud.gateway.filter.GatewayFilter;
 import org.springframework.cloud.gateway.filter.GatewayFilterChain;
@@ -18,13 +17,12 @@ import org.springframework.kafka.core.reactive.ReactiveKafkaProducerTemplate;
 import org.springframework.stereotype.Component;
 import org.springframework.web.server.ResponseStatusException;
 import org.springframework.web.server.ServerWebExchange;
-import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
-import reactor.kafka.receiver.KafkaReceiver;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
-import java.util.Objects;
-import java.util.UUID;
 
 import static com.example.chatgateway.global.constant.Constants.COOKIE_AUTH_HEADER;
 
@@ -57,7 +55,7 @@ public class AuthFilter implements GatewayFilter {
             return Mono.error(new ResponseStatusException(HttpStatus.UNAUTHORIZED, "No access token found"));
         }
 
-        String id = token;
+        String id = createFingerPrint(exchange, token);
         log.info("추출된 토큰: {} // 아이디: {}", token, id);
 
         TokenDTO tokenDTO = new TokenDTO(id, token);
@@ -66,7 +64,7 @@ public class AuthFilter implements GatewayFilter {
         return kafkaProducerTemplate.send(topic, tokenDTO)
                 .flatMap(result -> {
                     // Kafka에 메시지 전송 후 Redis에서 결과를 비동기적으로 조회
-                    return checkRedisForUserInfo(id.toString())
+                    return checkRedisForUserInfo(id)
                             .flatMap(userInfoDTO -> {
                                 ServerHttpRequest modifiedRequest = exchange.getRequest()
                                         .mutate()
@@ -86,6 +84,7 @@ public class AuthFilter implements GatewayFilter {
                 });
     }
 
+    // 쿠키 추출 메소드
     private String extractTokenFromCookies(ServerHttpRequest request) {
         // 쿠키에서 엑세스 토큰 추출
         String token = null;
@@ -113,6 +112,7 @@ public class AuthFilter implements GatewayFilter {
         }
     }
 
+    // redis 캐시 조회 메소드
     private Mono<UserInfoDTO> checkRedisForUserInfo(String id) {
         return Mono.defer(() -> {
                     UserInfoDTO userInfo = userInfoTemplate.opsForValue().get(id);
@@ -134,4 +134,29 @@ public class AuthFilter implements GatewayFilter {
                                 HttpStatus.INTERNAL_SERVER_ERROR, "레디스 유저 임시정보 조회 에러", e)));
     }
 
+    // 디바이스 핑거프린트 생성 메소드
+    private String createFingerPrint(ServerWebExchange exchange, String token) {
+        ServerHttpRequest request = exchange.getRequest();
+
+        String userAgent = request.getHeaders().getFirst(HttpHeaders.USER_AGENT);
+        String ip = request.getRemoteAddress() != null ? request.getRemoteAddress().getAddress().getHostAddress() : "unknown-ip";
+        String data = userAgent + ip + token;
+
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] hash = digest.digest(data.getBytes(StandardCharsets.UTF_8));
+
+            // 바이트 배열 16진수 문자열로 변환
+            StringBuilder hexString = new StringBuilder();
+            for (byte b : hash) {
+                String hex = Integer.toHexString(0xff & b);
+                if (hex.length() == 1) hexString.append('0');
+                hexString.append(hex);
+            }
+
+            return hexString.toString();
+        } catch (NoSuchAlgorithmException e) {
+            throw new RuntimeException("해시 알고리즘 탐색 불가", e);
+        }
+    }
 }
