@@ -12,6 +12,6 @@ import java.util.UUID;
 @AllArgsConstructor
 @NoArgsConstructor
 public class TokenDTO {
-    private UUID id;
+    private String id;
     private String token;
 }

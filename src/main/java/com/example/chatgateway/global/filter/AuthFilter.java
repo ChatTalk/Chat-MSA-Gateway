@@ -57,7 +57,7 @@ public class AuthFilter implements GatewayFilter {
             return Mono.error(new ResponseStatusException(HttpStatus.UNAUTHORIZED, "No access token found"));
         }
 
-        UUID id = UUID.randomUUID();
+        String id = token;
         log.info("추출된 토큰: {} // 아이디: {}", token, id);
 
         TokenDTO tokenDTO = new TokenDTO(id, token);
