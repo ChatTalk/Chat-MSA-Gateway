@@ -8,6 +8,7 @@ import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.cloud.gateway.filter.GatewayFilter;
 import org.springframework.cloud.gateway.filter.GatewayFilterChain;
+import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.http.HttpCookie;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -36,6 +37,7 @@ public class AuthFilter implements GatewayFilter {
 
     private final ReactiveKafkaProducerTemplate<String, TokenDTO> kafkaProducerTemplate;
     private final KafkaReceiver<String, UserInfoDTO> kafkaReceiver;
+    private final RedisTemplate<String, UserInfoDTO> userInfoTemplate;
 
     @Override
     public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
@@ -49,11 +51,6 @@ public class AuthFilter implements GatewayFilter {
         if (path.startsWith("/api/users/login") || path.startsWith("/api/users/signup")) {
             return chain.filter(exchange);
         }
-
-        // 토큰 쿠키에서 추출
-        /**
-         * 웹소켓 경로의 토큰(from header) http 경로의 토큰(from cookie) 파싱 위치 다른 것 인지
-         */
 
         String token = extractTokenFromCookies(exchange.getRequest());
         if (token == null) {
@@ -72,11 +69,13 @@ public class AuthFilter implements GatewayFilter {
                     // 인증 응답 대기
                     return kafkaReceiver
                             .receive()
-                            /**
-                             * 필터 쪽 여기가 문제인 거 같은데 왜 그런질 모르겠네... 흠... 다시 해 보자...
-                             */
                             .filter(record -> record.key().equals(id.toString()))
                             .next()
+                            .timeout(Duration.ofSeconds(10))  // 타임아웃 설정
+                            .onErrorResume(e -> {
+                                        // 오류 처리
+                                        return Mono.error(new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Error during authentication", e));
+                                    })
                             .map(ConsumerRecord::value)
                             .flatMap(userInfoDTO -> {
                                 // 쿠키 업데이트
@@ -90,26 +89,10 @@ public class AuthFilter implements GatewayFilter {
                                         .build();
 
                                 log.info("응답 이메일 및 권한: {}. {}", userInfoDTO.getEmail(), userInfoDTO.getRole());
-
                                 log.info("인증 이후의 응답 헤더 확인: {}", exchange.getResponse().getHeaders());
-                                // 여기까지는 Vary 값들이 하나씩만 찍히는데 왜 브라우저 응답 헤더에는 2개씩 찍히지?
-                                // 솔직히 얘가 원인이라고 확실하지도 않은 상태... 그냥 다른 애들이랑 비교하니 여기에서 차이가 보여서 그런 거...ㅠ
-//
-//                                if (uri.startsWith("http://localhost:8080/stomp/chat")) {
-//                                    log.info("확인이나 좀 해보자: {}",
-//                                            Objects.requireNonNull(exchange.getResponse().getHeaders().get(HttpHeaders.VARY)));
-//
-//                                    exchange.getResponse().getHeaders().remove(HttpHeaders.VARY);
-//                                    exchange.getResponse().getHeaders().add("content-type", "application/json");
-//                                }
 
                                 // 수정된 요청으로 다음 단계로 넘기기
                                 return chain.filter(exchange.mutate().request(modifiedRequest).build());
-                            })
-                            .timeout(Duration.ofSeconds(10))  // 타임아웃 설정
-                            .onErrorResume(e -> {
-                                // 오류 처리
-                                return Mono.error(new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Error during authentication", e));
                             });
                 }));
     }
