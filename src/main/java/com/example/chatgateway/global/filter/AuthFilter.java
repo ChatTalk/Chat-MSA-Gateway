@@ -23,8 +23,10 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
+import java.util.concurrent.TimeUnit;
 
 import static com.example.chatgateway.global.constant.Constants.COOKIE_AUTH_HEADER;
+import static com.example.chatgateway.global.constant.Constants.REDIS_ACCESS_KEY;
 
 @Slf4j
 @Component
@@ -33,6 +35,9 @@ public class AuthFilter implements GatewayFilter {
 
     @Value("${kafka.topic}")
     private String topic;
+
+    @Value("${cache.key}")
+    private String key;
 
     private final ReactiveKafkaProducerTemplate<String, TokenDTO> kafkaProducerTemplate;
     private final RedisTemplate<String, UserInfoDTO> userInfoTemplate;
@@ -55,24 +60,29 @@ public class AuthFilter implements GatewayFilter {
             return Mono.error(new ResponseStatusException(HttpStatus.UNAUTHORIZED, "No access token found"));
         }
 
-        String id = createFingerPrint(exchange, token);
+        String id = createFingerPrint(token);
         log.info("추출된 토큰: {} // 아이디: {}", token, id);
 
-        // 캐시 조회
-        if (userInfoTemplate != null && Boolean.TRUE.equals(userInfoTemplate.hasKey(id))) {
-            UserInfoDTO userInfoDTO = userInfoTemplate.opsForValue().get(id);
+        if (Boolean.TRUE.equals(userInfoTemplate.hasKey(REDIS_ACCESS_KEY + id))) {
+            UserInfoDTO userInfoDTO = userInfoTemplate.opsForValue().get(REDIS_ACCESS_KEY + id);
 
-            if (userInfoDTO != null) { // userInfoDTO null 체크 추가
-                ServerHttpRequest modifiedRequest = exchange.getRequest()
-                        .mutate()
-                        .header("email", userInfoDTO.getEmail())
-                        .header("role", userInfoDTO.getRole())
-                        .build();
-
-                return chain.filter(exchange.mutate().request(modifiedRequest).build());
+            if (userInfoDTO == null) {
+                throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "No access token info found in redis");
             }
+
+            log.info("캐시 존재");
+
+            ServerHttpRequest modifiedRequest = exchange.getRequest()
+                    .mutate()
+                    .header("email", userInfoDTO.getEmail())
+                    .header("role", userInfoDTO.getRole())
+                    .header("id", userInfoDTO.getId())
+                    .build();
+
+            return chain.filter(exchange.mutate().request(modifiedRequest).build());
         }
 
+        log.info("캐시 없음, 인증 요청 단계 돌입");
         TokenDTO tokenDTO = new TokenDTO(id, token);
 
         // 인증 요청 Kafka 전송(파티션의 존재 이유: 묶어야 할 메세지들을 파티션으로 보내면서 대기열 구현)
@@ -85,6 +95,7 @@ public class AuthFilter implements GatewayFilter {
                                         .mutate()
                                         .header("email", userInfoDTO.getEmail())
                                         .header("role", userInfoDTO.getRole())
+                                        .header("id", userInfoDTO.getId())
                                         .build();
 
                                 updateTokenCookieIfNeeded(exchange, token, userInfoDTO.getToken());
@@ -130,10 +141,22 @@ public class AuthFilter implements GatewayFilter {
     // redis 캐시 조회 메소드
     private Mono<UserInfoDTO> checkRedisForUserInfo(String id) {
         return Mono.defer(() -> {
-                    UserInfoDTO userInfo = userInfoTemplate.opsForValue().get(id);
+                    UserInfoDTO userInfo = userInfoTemplate.opsForValue().get(REDIS_ACCESS_KEY + id);
 
                     if (userInfo != null) {
                         log.info("Redis에서 사용자 정보 조회 성공 - UserInfo: {}", userInfo);  // 성공 시 로그 추가
+
+                        /**
+                         * 정합성을 맞추기 위한 로직
+                         * 1. 기존 토큰이어서 업데이트가 되었을 수도 있는 id를 고려해서 기존 id의 값은 삭제한다.
+                         * 2. 그게 아니라면 그냥 놔두고
+                         */
+
+                        if (!id.equals(userInfo.getId())) {
+                            userInfoTemplate.delete(REDIS_ACCESS_KEY + id);
+                            userInfoTemplate.opsForValue().set(REDIS_ACCESS_KEY + userInfo.getId(), userInfo, 120 * 30, TimeUnit.SECONDS);
+                        }
+
                         return Mono.just(userInfo);
                     } else {
                         log.info("Redis에서 사용자 정보가 없음 - ID: {}\n 조회하는 시간: {}", id, System.nanoTime());  // 데이터가 없는 경우 로그 추가
@@ -142,7 +165,7 @@ public class AuthFilter implements GatewayFilter {
                 })
                 .repeatWhenEmpty(flux -> flux
                         .delayElements(Duration.ofMillis(50)) // 0.05초 간격으로 재시도
-                        .take(5)) // 재시도
+                        .take(200)) // 재시도
                 .timeout(Duration.ofSeconds(10)) // 타임아웃 설정
                 .onErrorResume(e ->
                         Mono.error(new ResponseStatusException(
@@ -150,12 +173,8 @@ public class AuthFilter implements GatewayFilter {
     }
 
     // 디바이스 핑거프린트 생성 메소드
-    private String createFingerPrint(ServerWebExchange exchange, String token) {
-        ServerHttpRequest request = exchange.getRequest();
-
-        String userAgent = request.getHeaders().getFirst(HttpHeaders.USER_AGENT);
-        String ip = request.getRemoteAddress() != null ? request.getRemoteAddress().getAddress().getHostAddress() : "unknown-ip";
-        String data = userAgent + ip + token;
+    private String createFingerPrint(String token) {
+        String data = key + token;
 
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
