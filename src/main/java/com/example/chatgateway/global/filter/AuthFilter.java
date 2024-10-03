@@ -9,7 +9,6 @@ import org.springframework.cloud.gateway.filter.GatewayFilter;
 import org.springframework.cloud.gateway.filter.GatewayFilterChain;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.http.HttpCookie;
-import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseCookie;
 import org.springframework.http.server.reactive.ServerHttpRequest;
@@ -45,7 +44,7 @@ public class AuthFilter implements GatewayFilter {
     @Override
     public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
         String uri = exchange.getRequest().getURI().toString();
-        log.info("요청이 들어온 경로: {}", uri);
+        log.info("☆☪☆☪☆☪☆☪☆☪☆☪☆☪☆☪☆☪☆☪ 요청이 들어온 경로: {} ☆☪☆☪☆☪☆☪☆☪☆☪☆☪☆☪☆☪☆☪☆☪", uri);
         String path = exchange.getRequest().getURI().getPath();
 
         log.info("응답 초기 헤더 확인: {}", exchange.getResponse().getHeaders()); // 여기서는 문제 없음
@@ -55,7 +54,15 @@ public class AuthFilter implements GatewayFilter {
             return chain.filter(exchange);
         }
 
-        String token = extractTokenFromCookies(exchange.getRequest());
+        String token;
+
+        if (path.startsWith("/open-chats/access")) {
+            token = exchange.getRequest().getHeaders().getFirst("Authorization");
+        } else {
+            token = extractTokenFromCookies(exchange.getRequest());
+        }
+
+        log.info("확인된 토큰: {}", token);
         if (token == null) {
             return Mono.error(new ResponseStatusException(HttpStatus.UNAUTHORIZED, "No access token found"));
         }
