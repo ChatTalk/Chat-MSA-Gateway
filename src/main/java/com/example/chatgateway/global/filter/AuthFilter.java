@@ -54,13 +54,13 @@ public class AuthFilter implements GatewayFilter {
             return chain.filter(exchange);
         }
 
-        String token;
+        String token= extractTokenFromCookies(exchange.getRequest());;
 
-        if (path.startsWith("/open-chats/access")) {
-            token = exchange.getRequest().getHeaders().getFirst("Authorization");
-        } else {
-            token = extractTokenFromCookies(exchange.getRequest());
-        }
+//        if (path.startsWith("/open-chats/access")) {
+//            token = exchange.getRequest().getHeaders().getFirst("Authorization");
+//        } else {
+//            token = extractTokenFromCookies(exchange.getRequest());
+//        }
 
         log.info("확인된 토큰: {}", token);
         if (token == null) {
