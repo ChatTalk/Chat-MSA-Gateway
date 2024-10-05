@@ -25,6 +25,9 @@ public class RoutesConfig {
     @Value("${uri.ws}")
     private String ws;
 
+    @Value("${uri.participant}")
+    private String participant;
+
     private final AuthFilter authFilter;
 
     @Bean
@@ -42,6 +45,9 @@ public class RoutesConfig {
                         .uri(message))
 //                .route("ws", r -> r.path("/stomp/chat/**")
 //                        .uri(ws))
+                .route("participant", r -> r.path("/api/participants/**")
+                        .filters(f -> f.filter(authFilter))
+                        .uri(participant))
                 .build();
     }
 

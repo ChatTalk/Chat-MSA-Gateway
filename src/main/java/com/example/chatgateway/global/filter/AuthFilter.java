@@ -4,12 +4,11 @@ import com.example.chatgateway.domain.dto.TokenDTO;
 import com.example.chatgateway.domain.dto.UserInfoDTO;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.cloud.gateway.filter.GatewayFilter;
 import org.springframework.cloud.gateway.filter.GatewayFilterChain;
+import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.http.HttpCookie;
-import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseCookie;
 import org.springframework.http.server.reactive.ServerHttpRequest;
@@ -18,13 +17,15 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.server.ResponseStatusException;
 import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Mono;
-import reactor.kafka.receiver.KafkaReceiver;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
-import java.util.Objects;
-import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 
 import static com.example.chatgateway.global.constant.Constants.COOKIE_AUTH_HEADER;
+import static com.example.chatgateway.global.constant.Constants.REDIS_ACCESS_KEY;
 
 @Slf4j
 @Component
@@ -34,13 +35,16 @@ public class AuthFilter implements GatewayFilter {
     @Value("${kafka.topic}")
     private String topic;
 
+    @Value("${cache.key}")
+    private String key;
+
     private final ReactiveKafkaProducerTemplate<String, TokenDTO> kafkaProducerTemplate;
-    private final KafkaReceiver<String, UserInfoDTO> kafkaReceiver;
+    private final RedisTemplate<String, UserInfoDTO> userInfoTemplate;
 
     @Override
     public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
         String uri = exchange.getRequest().getURI().toString();
-        log.info("요청이 들어온 경로: {}", uri);
+        log.info("☆☪☆☪☆☪☆☪☆☪☆☪☆☪☆☪☆☪☆☪ 요청이 들어온 경로: {} ☆☪☆☪☆☪☆☪☆☪☆☪☆☪☆☪☆☪☆☪☆☪", uri);
         String path = exchange.getRequest().getURI().getPath();
 
         log.info("응답 초기 헤더 확인: {}", exchange.getResponse().getHeaders()); // 여기서는 문제 없음
@@ -50,70 +54,70 @@ public class AuthFilter implements GatewayFilter {
             return chain.filter(exchange);
         }
 
-        // 토큰 쿠키에서 추출
-        /**
-         * 웹소켓 경로의 토큰(from header) http 경로의 토큰(from cookie) 파싱 위치 다른 것 인지
-         */
+        String token= extractTokenFromCookies(exchange.getRequest());;
 
-        String token = extractTokenFromCookies(exchange.getRequest());
+//        if (path.startsWith("/open-chats/access")) {
+//            token = exchange.getRequest().getHeaders().getFirst("Authorization");
+//        } else {
+//            token = extractTokenFromCookies(exchange.getRequest());
+//        }
+
+        log.info("확인된 토큰: {}", token);
         if (token == null) {
             return Mono.error(new ResponseStatusException(HttpStatus.UNAUTHORIZED, "No access token found"));
         }
 
-        UUID id = UUID.randomUUID();
+        String id = createFingerPrint(token);
         log.info("추출된 토큰: {} // 아이디: {}", token, id);
 
+        if (Boolean.TRUE.equals(userInfoTemplate.hasKey(REDIS_ACCESS_KEY + id))) {
+            UserInfoDTO userInfoDTO = userInfoTemplate.opsForValue().get(REDIS_ACCESS_KEY + id);
+
+            if (userInfoDTO == null) {
+                throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "No access token info found in redis");
+            }
+
+            log.info("캐시 존재");
+
+            ServerHttpRequest modifiedRequest = exchange.getRequest()
+                    .mutate()
+                    .header("email", userInfoDTO.getEmail())
+                    .header("role", userInfoDTO.getRole())
+                    .header("id", userInfoDTO.getId())
+                    .build();
+
+            return chain.filter(exchange.mutate().request(modifiedRequest).build());
+        }
+
+        log.info("캐시 없음, 인증 요청 단계 돌입");
         TokenDTO tokenDTO = new TokenDTO(id, token);
 
-        // 인증 요청 Kafka 전송
-        // 동일한 파티션을 왕복
-        return kafkaProducerTemplate.send(topic, id.toString(), tokenDTO)
-                .then(Mono.defer(() -> {
-                    // 인증 응답 대기
-                    return kafkaReceiver
-                            .receive()
-                            /**
-                             * 필터 쪽 여기가 문제인 거 같은데 왜 그런질 모르겠네... 흠... 다시 해 보자...
-                             */
-                            .filter(record -> record.key().equals(id.toString()))
-                            .next()
-                            .map(ConsumerRecord::value)
+        // 인증 요청 Kafka 전송(파티션의 존재 이유: 묶어야 할 메세지들을 파티션으로 보내면서 대기열 구현)
+        return kafkaProducerTemplate.send(topic, tokenDTO)
+                .flatMap(result -> {
+                    // Kafka에 메시지 전송 후 Redis에서 결과를 비동기적으로 조회
+                    return checkRedisForUserInfo(id)
                             .flatMap(userInfoDTO -> {
-                                // 쿠키 업데이트
-                                updateTokenCookieIfNeeded(exchange, token, userInfoDTO.getToken());
-
-                                // 인증 결과를 요청 헤더에 추가
                                 ServerHttpRequest modifiedRequest = exchange.getRequest()
                                         .mutate()
                                         .header("email", userInfoDTO.getEmail())
                                         .header("role", userInfoDTO.getRole())
+                                        .header("id", userInfoDTO.getId())
                                         .build();
 
-                                log.info("응답 이메일 및 권한: {}. {}", userInfoDTO.getEmail(), userInfoDTO.getRole());
-
-                                log.info("인증 이후의 응답 헤더 확인: {}", exchange.getResponse().getHeaders());
-                                // 여기까지는 Vary 값들이 하나씩만 찍히는데 왜 브라우저 응답 헤더에는 2개씩 찍히지?
-                                // 솔직히 얘가 원인이라고 확실하지도 않은 상태... 그냥 다른 애들이랑 비교하니 여기에서 차이가 보여서 그런 거...ㅠ
-//
-//                                if (uri.startsWith("http://localhost:8080/stomp/chat")) {
-//                                    log.info("확인이나 좀 해보자: {}",
-//                                            Objects.requireNonNull(exchange.getResponse().getHeaders().get(HttpHeaders.VARY)));
-//
-//                                    exchange.getResponse().getHeaders().remove(HttpHeaders.VARY);
-//                                    exchange.getResponse().getHeaders().add("content-type", "application/json");
-//                                }
-
-                                // 수정된 요청으로 다음 단계로 넘기기
+                                updateTokenCookieIfNeeded(exchange, token, userInfoDTO.getToken());
                                 return chain.filter(exchange.mutate().request(modifiedRequest).build());
-                            })
-                            .timeout(Duration.ofSeconds(10))  // 타임아웃 설정
-                            .onErrorResume(e -> {
-                                // 오류 처리
-                                return Mono.error(new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Error during authentication", e));
                             });
-                }));
+                })
+                .onErrorResume(e -> {
+                    // Kafka 전송 오류 처리
+                    log.error("Kafka 전송 오류: {}", e.getMessage());
+                    return Mono.error(
+                            new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "카프카 전송 로직 에러 발생"));
+                });
     }
 
+    // 쿠키 추출 메소드
     private String extractTokenFromCookies(ServerHttpRequest request) {
         // 쿠키에서 엑세스 토큰 추출
         String token = null;
@@ -131,14 +135,69 @@ public class AuthFilter implements GatewayFilter {
 
     // 쿠키 업데이트 메소드
     private void updateTokenCookieIfNeeded(ServerWebExchange exchange, String currentToken, String newToken) {
-        log.info("토큰 업데이트? 현재 토큰 {}, 새로운 토큰 {}", currentToken, newToken);
-        log.info("토큰이 같은지 다른지: {}", currentToken.equals(newToken));
         if (!currentToken.equals(newToken)) {
+            log.info("토큰 업데이트: 현재 토큰 {} ->, 새로운 토큰 {}", currentToken, newToken);
             exchange.getResponse().addCookie(ResponseCookie.from(COOKIE_AUTH_HEADER, newToken)
                     .path("/")  // 쿠키의 유효 경로 설정
 //                    .httpOnly(true)  // 보안 설정 (HTTP만 접근 가능)
                     .maxAge(Duration.ofHours(1))  // 쿠키 유효기간 설정
                     .build());
+        }
+    }
+
+    // redis 캐시 조회 메소드
+    private Mono<UserInfoDTO> checkRedisForUserInfo(String id) {
+        return Mono.defer(() -> {
+                    UserInfoDTO userInfo = userInfoTemplate.opsForValue().get(REDIS_ACCESS_KEY + id);
+
+                    if (userInfo != null) {
+                        log.info("Redis에서 사용자 정보 조회 성공 - UserInfo: {}", userInfo);  // 성공 시 로그 추가
+
+                        /**
+                         * 정합성을 맞추기 위한 로직
+                         * 1. 기존 토큰이어서 업데이트가 되었을 수도 있는 id를 고려해서 기존 id의 값은 삭제한다.
+                         * 2. 그게 아니라면 그냥 놔두고
+                         */
+
+                        if (!id.equals(userInfo.getId())) {
+                            userInfoTemplate.delete(REDIS_ACCESS_KEY + id);
+                            userInfoTemplate.opsForValue().set(REDIS_ACCESS_KEY + userInfo.getId(), userInfo, 120 * 30, TimeUnit.SECONDS);
+                        }
+
+                        return Mono.just(userInfo);
+                    } else {
+                        log.info("Redis에서 사용자 정보가 없음 - ID: {}\n 조회하는 시간: {}", id, System.nanoTime());  // 데이터가 없는 경우 로그 추가
+                        return Mono.empty();
+                    }
+                })
+                .repeatWhenEmpty(flux -> flux
+                        .delayElements(Duration.ofMillis(50)) // 0.05초 간격으로 재시도
+                        .take(200)) // 재시도
+                .timeout(Duration.ofSeconds(10)) // 타임아웃 설정
+                .onErrorResume(e ->
+                        Mono.error(new ResponseStatusException(
+                                HttpStatus.INTERNAL_SERVER_ERROR, "레디스 유저 임시정보 조회 에러", e)));
+    }
+
+    // 디바이스 핑거프린트 생성 메소드
+    private String createFingerPrint(String token) {
+        String data = key + token;
+
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] hash = digest.digest(data.getBytes(StandardCharsets.UTF_8));
+
+            // 바이트 배열 16진수 문자열로 변환
+            StringBuilder hexString = new StringBuilder();
+            for (byte b : hash) {
+                String hex = Integer.toHexString(0xff & b);
+                if (hex.length() == 1) hexString.append('0');
+                hexString.append(hex);
+            }
+
+            return hexString.toString();
+        } catch (NoSuchAlgorithmException e) {
+            throw new RuntimeException("해시 알고리즘 탐색 불가", e);
         }
     }
 }
