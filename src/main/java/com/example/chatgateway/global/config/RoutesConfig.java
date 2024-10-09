@@ -45,7 +45,7 @@ public class RoutesConfig {
                         .uri(message))
 //                .route("ws", r -> r.path("/stomp/chat/**")
 //                        .uri(ws))
-                .route("participant", r -> r.path("/api/participants/**")
+                .route("participant", r -> r.path("/stomp/participant/**")
                         .filters(f -> f.filter(authFilter))
                         .uri(participant))
                 .build();
